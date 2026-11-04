@@ -1,0 +1,25 @@
+This project builds on ConSolv:
+
+  ConSolv: Solvent-Conditional Machine Learning Implicit Solvent Potential
+  Linying Zhang and Julija Zavadlav, arXiv:2606.24983 (2026)
+  https://github.com/tummfm/ConSolv
+
+Vendored third-party code (Apache License 2.0, see each directory's LICENSE):
+
+  third_party/chemtrain/   chemtrain + jax_md_mod
+                           Copyright 2023 Multiscale Modeling of Fluid Materials, TU Munich
+                           Source: ConSolv commit 06801dd, external/chemtrain
+                           Unmodified. Docs, examples, tests and chemsim were not copied.
+
+  third_party/chemutils/   chemutils
+                           Copyright 2023 Multiscale Modeling of Fluid Materials, TU Munich
+                           Source: ConSolv commit 06801dd, external/chemutils
+                           (pyproject declares Apache-2.0; LICENSE text copied from chemtrain)
+                           Modifications:
+                           - chemutils/models/mace/test_block.py: solvent descriptor table
+                             read from <repo>/upstream/descriptor.csv instead of
+                             <repo>/dataset/descriptor.csv
+                           - Readme.md renamed README.md to match pyproject.toml
+
+Not redistributed: ConSolv's published checkpoints, configs and descriptor table carry
+no licence, so scripts/fetch_upstream.py downloads them from the pinned upstream commit.

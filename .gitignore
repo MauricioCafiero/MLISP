@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.egg-info/
+
+# published ConSolv files: no licence upstream, fetched by scripts/fetch_upstream.py
+upstream/
+
+# research data/outputs (structures may be unpublished)
+inputs/
+data/
+results/
+runs/
+
+molecule.pdf
