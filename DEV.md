@@ -178,10 +178,40 @@ solvent differences. The published checkpoint has essentially none of the large 
 water-vs-hexane shift, and water is not in its training list. Caveats: tiny data;
 validation frames come from the same MD runs as training frames; whole-network fine-tune.
 
+## BE with the ALPB-trained model vs GFN2/ALPB
+
+`binding_energy.py --params runs/alpb5_solv_ft` (complex relaxed with the trained model) vs
+the published model. Reference: `gfn2_binding.py`, GFN2/ALPB single points of complex, rod and
+wheel on each model's own relaxed geometries. BE in kcal/mol.
+
+| system | solvent | published | GFN2/ALPB (pub. geoms) | ALPB-trained | GFN2/ALPB (trained geoms) |
+|---|---|---|---|---|---|
+| rot1 | hexane | −28.54 | −18.55 | −24.12 | −18.26 |
+| rot1 | chloroform | −25.91 | −16.16 | −22.04 | −15.91 |
+| rot1 | acetone | −23.70 | −12.96 | −19.41 | −12.58 |
+| rot1 | DMF | −23.13 | −12.61 | −18.91 | −12.25 |
+| rot1 | water | −25.24 | −22.36 | −20.06 | −22.16 |
+| rot2 | hexane | −27.81 | −20.82 | −23.36 | −21.38 |
+| rot2 | chloroform | −25.49 | −18.29 | −22.11 | −18.60 |
+| rot2 | acetone | −24.02 | −16.74 | −19.55 | −15.59 |
+| rot2 | DMF | −23.42 | −16.39 | −19.07 | −15.18 |
+| rot2 | water | −25.57 | −24.19 | −20.56 | −24.36 |
+
+MAE vs GFN2/ALPB: rot1 8.78 → 5.52, rot2 5.97 → 3.43. Spread across solvents: GFN2/ALPB 9–10,
+both models ~4–5.
+
+- Training removes a uniform 3–4 kcal/mol of over-binding. About 6 kcal/mol of over-binding
+  remains in the organic solvents, which sits in the vacuum part (interaction energy still
+  mostly from the wB97M-trained prior after 5 epochs).
+- Ordering among the organic solvents (hexane > chloroform > acetone ≈ DMF) agrees between
+  both models and GFN2/ALPB.
+- GFN2/ALPB gives the strongest binding in water (nonpolar/cavity term). The trained model
+  turns up in water by ~1 kcal/mol vs ALPB's ~10: right direction, far too small.
+- Reference BE moves < ~1 kcal/mol between the two models' geometries, so this compares
+  energies, not structures.
+
 ## Next steps (not done)
 
-- Use trained params in `binding_energy.py` (it only loads the published checkpoint now),
-  and compare the BE solvent trend with GFN2/ALPB BEs on the same geometries.
 - Train only the solvent part on E_ALPB − E_gas with the vacuum part frozen, closer to
   ConSolv's vacuum + solvent split. ConSolv itself fits the solvent part top-down to
   experimental ΔG_solv.
