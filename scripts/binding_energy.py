@@ -14,7 +14,7 @@ Model loading reproduces ConSolv's examples/SFE/evaluation/evaluate_molecule.py
 kJ/mol; inputs/outputs here are Angstrom xyz and kcal/mol.
 
     python scripts/binding_energy.py inputs/rot1.xyz inputs/rot2.xyz \
-        --solvents water=1 dmso=2 acetone=3
+        --solvents water=1 dmso=104 acetone=7 [--params runs/<name>]
 (solv_species indices from scripts/solvent_index.py)
 """
 import argparse
@@ -48,6 +48,8 @@ p.add_argument("xyz", nargs="+")
 p.add_argument("--solvents", nargs="+", required=True, help="name=solv_species")
 p.add_argument("--fmax", type=float, default=0.02, help="eV/A")
 p.add_argument("--steps", type=int, default=3000)
+p.add_argument("--params", help="a runs/<name> dir from train.py --model solvent "
+                                 "(default: the published ConSolv checkpoint)")
 p.add_argument("--out", default=str(ROOT / "results"))
 args = p.parse_args()
 solvents = [(s.split("=")[0], int(s.split("=")[1])) for s in args.solvents]
@@ -55,11 +57,19 @@ xyz_files = [Path(x).resolve() for x in args.xyz]
 out = Path(args.out).resolve()
 out.mkdir(parents=True, exist_ok=True)
 
-# --- published ConSolv solvent model -----------------------------------------
-config = tomli.load(open(UPSTREAM / "solvent/config.toml", "rb"))
-params = consolv_model.published_solvent_params(
-    UPSTREAM / "vacuum/best_params_1.pkl", UPSTREAM / "solvent/full_init_params.pkl",
-    UPSTREAM / "solvent/final_params.pkl")
+# --- solvent model: published ConSolv checkpoint, or our own trained one ----------
+# A trained model carries a per-element energy shift (train.py's E0 refit); it cancels
+# in BE because complex = rod + wheel in composition.
+if args.params:
+    run = Path(args.params).resolve()
+    config = tomli.load(open(run / "config.toml", "rb"))
+    assert config["model"]["type"] == "MACE_CONSOL", "binding needs a solvent model"
+    params = consolv_model.load_params(run / "params.pkl")
+else:
+    config = tomli.load(open(UPSTREAM / "solvent/config.toml", "rb"))
+    params = consolv_model.published_solvent_params(
+        UPSTREAM / "vacuum/best_params_1.pkl", UPSTREAM / "solvent/full_init_params.pkl",
+        UPSTREAM / "solvent/final_params.pkl")
 
 csv = out / "binding.csv"  # extend an existing table; a rerun replaces matching rows
 rows = pd.read_csv(csv).to_dict("records") if csv.exists() else []

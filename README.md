@@ -103,6 +103,9 @@ upstream/              published ConSolv files (downloaded, not committed)
 
 ## Credits and licences
 
+This project's code and docs are MIT-licensed (`LICENSE`). Vendored code in `third_party/`
+keeps its own Apache-2.0 licence.
+
 - **ConSolv** (method, published checkpoint, solvent descriptor table): Linying Zhang and
   Julija Zavadlav, TU Munich. Please cite their paper if you use this. ConSolv's top-level
   files carry no licence, so they are not redistributed here: `scripts/fetch_upstream.py`
