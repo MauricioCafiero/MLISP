@@ -9,11 +9,11 @@ is open. User-facing docs are in `README.md`.
 |---|---|
 | Published ConSolv checkpoint runs (CPU, jax 0.4.30) | done; regression-checked after vendoring |
 | Binding energies in any solvent (`binding_energy.py`) | done; fragment evaluation verified (below) |
-| GFN2 reference data (`make_gfn2_data.py`) | done for gas phase; ALPB path written, not yet run |
-| (a) Vacuum MACE force-matching (`train_vacuum.py`) | mini test passed (below) |
+| GFN2 reference data (`make_gfn2_data.py`) | gas sampling + ALPB relabel both run |
+| (a) Vacuum MACE force-matching (`train.py --model vacuum`) | mini test passed (below) |
 | Upstream clone | removed; nothing depends on it |
 | Fresh-venv install from README | tested: reproduces regression exactly |
-| (b) Solvent head trained bottom-up on GFN2/ALPB − GFN2/gas | not started |
+| (b) Solvent model trained on GFN2/ALPB in 5 solvents (`train.py --model solvent`) | mini test passed (below) |
 | MPS / jax-metal | not tried |
 
 ## Where the fixes to upstream live
@@ -76,7 +76,7 @@ ecosystem. It does not resolve to a working set.
    the bound or the separated geometry.
 6. **Units.** chemtrain uses nm and kJ/mol. The published vacuum model's energies are
    E − Σ E0(Z) with MACE-OFF wB97M E0s (SPICE converted from Bohr/Hartree).
-   `train_vacuum.py` references GFN2 data to GFN2 isolated-atom E0s the same way.
+   `train.py` references GFN2 data to GFN2 isolated-atom E0s the same way.
 7. `chemutils` reads the descriptor table at import-time path
    `<repo>/upstream/descriptor.csv` (changed from `dataset/`; see NOTICE).
 
@@ -139,23 +139,55 @@ Validation RMSE:
 - **E0 refit is required** when the reference level differs from the starting model's.
   The published model sits on wB97M E0s and the data on GFN2 E0s: about 33 kcal/mol/atom of
   pure offset. Without the refit, energy gradients swamp the forces and wreck the weights.
-  `train_vacuum.py` fits a per-element shift to the starting model's residuals (lstsq,
+  `train.py` fits a per-element shift to the starting model's residuals (lstsq,
   min-norm; complex = rod + wheel makes it rank-deficient), removes it from the targets and
   stores it in `runs/<name>/config.toml`. Fitted shifts: H −165, C −137, N −17, O −55,
   F −116 kJ/mol.
 - Gradient norms are still 1e10–1e13 before clipping (kJ/mol, nm, sums over 144 atoms).
   Clipping keeps it stable. Consider normalising the loss (per-atom energy, unit force
   scale) before real runs.
-- chemtrain's trainer creates `checkpoints/` in the cwd; `train_vacuum.py` chdirs to
+- chemtrain's trainer creates `checkpoints/` in the cwd; `train.py` chdirs to
   `runs/<name>/`.
 
-## Training plan
+## (b) Solvent-model mini test
 
-- **(a) Vacuum prior:** force-match on GFN2 energies and forces. Mini test: 5 rotaxane
-  molecules (2 complexes, 2 rods, wheel), 300 K MD, 20 + 2 frames each.
-- **(b) Solvent head, bottom-up:** relabel the same frames with GFN2/ALPB in several
-  solvents; train U_solvent on E_ALPB − E_gas (and force differences) with the vacuum part
-  frozen. This differs from ConSolv's top-down fit to experimental ΔG_solv.
+Data: the same 110 gas frames relabelled (`make_gfn2_data.py --relabel`) with GFN2/ALPB in
+hexane (ConSolv index 25), chloroform (11), acetone (7), DMF (53) and water (1): 500 train /
+50 valid frames on identical geometries. About 10 min, serial. Training:
+`train.py --model solvent`, published ConSolv solvent checkpoint, E0 refit (shared across
+solvents), 5 epochs, batch 4, lr 2.5e-4. About 2.6 min total on CPU. The whole network was
+trained on total ALPB energies and forces (nothing frozen).
+
+| validation | published (after E0 refit) | after 5 epochs |
+|---|---|---|
+| E RMSE (kcal/mol/frame) | 7.30 | 3.37 |
+| F RMSE (kcal/mol/Å) | 4.93 | 4.17 |
+
+E(solvent) − E(hexane) on identical geometries (kcal/mol):
+
+| solvent | ALPB reference mean | RMSE before | RMSE after |
+|---|---|---|---|
+| chloroform | −3.19 | 3.05 | 1.52 |
+| acetone | +0.21 | 5.10 | 2.69 |
+| DMF | +0.34 | 3.28 | 2.61 |
+| water | +19.78 | 18.71 | 5.38 |
+
+The per-frame `solv_species` reaches the solvent head through chemtrain's dynamic kwargs:
+every non-target key of the dataset is passed to the energy function. The model learns the
+solvent differences. The published checkpoint has essentially none of the large ALPB
+water-vs-hexane shift, and water is not in its training list. Caveats: tiny data;
+validation frames come from the same MD runs as training frames; whole-network fine-tune.
+
+## Next steps (not done)
+
+- Use trained params in `binding_energy.py` (it only loads the published checkpoint now),
+  and compare the BE solvent trend with GFN2/ALPB BEs on the same geometries.
+- Train only the solvent part on E_ALPB − E_gas with the vacuum part frozen, closer to
+  ConSolv's vacuum + solvent split. ConSolv itself fits the solvent part top-down to
+  experimental ΔG_solv.
+- Normalise the loss (gradient norms 1e10+ before clipping).
+- Real data: more molecules and solvents, independent validation trajectories; a GPU
+  (young-ng / Modal) for anything beyond a mini test.
 
 ## Conventions
 

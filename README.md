@@ -68,15 +68,23 @@ component without nitrogen is taken as the "wheel" (written for rotaxanes; gener
 ```sh
 <mace-env>/bin/python scripts/make_gfn2_data.py complex1.xyz complex2.xyz   # gas phase
 <mace-env>/bin/python scripts/make_gfn2_data.py ... --solvent water          # GFN2/ALPB
+# same geometries in a solvent (no new sampling):
+<mace-env>/bin/python scripts/make_gfn2_data.py --relabel data/gfn2_gas_train.xyz data/gfn2_gas_valid.xyz --solvent water
 ```
 
-**Fine-tune the vacuum prior:**
+**Fine-tune / train.** Data sets are read from `data/gfn2_<set>_{train,valid}.xyz`:
 
 ```sh
-.venv/bin/python scripts/train_vacuum.py data/gfn2_gas_train.xyz data/gfn2_gas_valid.xyz \
-    --init published --epochs 20 --name my_run      # or --init scratch
-# -> runs/my_run/{params.pkl, config.toml, metrics.csv}
+# vacuum prior on gas-phase data
+.venv/bin/python scripts/train.py --model vacuum --sets gas --name my_vac
+# solvent-conditional model on ALPB data in several solvents (name=solvent index)
+.venv/bin/python scripts/train.py --model solvent --sets hexane=25 acetone=7 water=1 --name my_solv
+# --init published (default) or scratch -> runs/<name>/{params.pkl, config.toml, metrics.csv}
 ```
+
+`train.py` refits the per-element energy reference to the starting model before training.
+This is needed whenever the reference method's isolated-atom energies differ from the
+checkpoint's (see `DEV.md`).
 
 ## Layout
 
@@ -87,7 +95,7 @@ scripts/
   binding_energy.py    implicit-solvent binding energies
   solvent_index.py     SMILES -> solvent index
   make_gfn2_data.py    GFN2-xTB reference data (gas / ALPB)
-  train_vacuum.py      force-matching fine-tune / training of the vacuum MACE
+  train.py             force-matching fine-tune / training (vacuum or solvent model)
   fetch_upstream.py    downloads the published ConSolv files
 third_party/           vendored chemtrain + chemutils (Apache-2.0, see NOTICE)
 upstream/              published ConSolv files (downloaded, not committed)
