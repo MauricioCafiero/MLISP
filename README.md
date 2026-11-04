@@ -1,4 +1,4 @@
-# consolv
+# MLISP — machine-learning implicit-solvent potentials
 
 Tools for running and training **solvent-conditional implicit-solvent machine-learning
 potentials** in JAX, built on [ConSolv](https://github.com/tummfm/ConSolv) (Zhang &
