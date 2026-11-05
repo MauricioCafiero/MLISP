@@ -15,6 +15,8 @@ kJ/mol; inputs/outputs here are Angstrom xyz and kcal/mol.
 
     python scripts/binding_energy.py inputs/rot1.xyz inputs/rot2.xyz \
         --solvents water=1 dmso=104 acetone=7 [--params runs/<name>]
+--vacuum-params runs/<vac>: E = E_vac(runs/<vac>) + E_solv(--params), for a solvent model
+trained on E_ALPB - E_gas (train.py --delta-from gas).
 (solv_species indices from scripts/solvent_index.py)
 """
 import argparse
@@ -48,8 +50,9 @@ p.add_argument("xyz", nargs="+")
 p.add_argument("--solvents", nargs="+", required=True, help="name=solv_species")
 p.add_argument("--fmax", type=float, default=0.02, help="eV/A")
 p.add_argument("--steps", type=int, default=3000)
-p.add_argument("--params", help="a runs/<name> dir from train.py --model solvent "
-                                 "(default: the published ConSolv checkpoint)")
+p.add_argument("--params", help="a runs/<name> dir from train.py --model solvent, or --model vacuum "
+                                 "with --solvents gas=0 (default: the published ConSolv checkpoint)")
+p.add_argument("--vacuum-params", help="a runs/<name> vacuum model added to --params (delta models)")
 p.add_argument("--out", default=str(ROOT / "results"))
 args = p.parse_args()
 solvents = [(s.split("=")[0], int(s.split("=")[1])) for s in args.solvents]
@@ -63,7 +66,7 @@ out.mkdir(parents=True, exist_ok=True)
 if args.params:
     run = Path(args.params).resolve()
     config = tomli.load(open(run / "config.toml", "rb"))
-    assert config["model"]["type"] == "MACE_CONSOL", "binding needs a solvent model"
+    # a vacuum model (train.py --model vacuum) gives gas-phase BE: use --solvents gas=0
     params = consolv_model.load_params(run / "params.pkl")
 else:
     config = tomli.load(open(UPSTREAM / "solvent/config.toml", "rb"))
@@ -101,12 +104,20 @@ for xyz in xyz_files:
         format=partition.Sparse, fractional_coordinates=False, capacity_multiplier=2.0)
     _, energy_fn_template = consolv_model.build(config["model"], displacement_fn, max_edges, avg_nn)
     energy_fn = energy_fn_template(params)
+    if args.vacuum_params:  # same cutoff, so the same neighbour list serves both models
+        vrun = Path(args.vacuum_params).resolve()
+        vconfig = tomli.load(open(vrun / "config.toml", "rb"))
+        assert vconfig["model"]["type"] == "MACE" and vconfig["model"]["r_cutoff"] == config["model"]["r_cutoff"]
+        _, vac_template = consolv_model.build(vconfig["model"], displacement_fn, max_edges, avg_nn)
+        vac_fn = vac_template(consolv_model.load_params(vrun / "params.pkl"))
 
     @jax.jit
     def energy(R, mask, solv):
         nbrs = nbrs_init.update(R, mask=mask)
-        e = energy_fn(R, nbrs, species=jnp.asarray(Z), mask=mask,
-                      solv_species=jnp.full(n, solv))
+        solv_kw = {"solv_species": jnp.full(n, solv)} if config["model"]["type"] == "MACE_CONSOL" else {}
+        e = energy_fn(R, nbrs, species=jnp.asarray(Z), mask=mask, **solv_kw)
+        if args.vacuum_params:
+            e = e + vac_fn(R, nbrs, species=jnp.asarray(Z), mask=mask)
         return e, nbrs.did_buffer_overflow
 
     @jax.jit

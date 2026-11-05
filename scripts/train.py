@@ -58,6 +58,14 @@ p.add_argument("--gamma-F", type=float, default=0.01)
 p.add_argument("--clip", type=float, default=10.0, help="global grad-norm clip")
 p.add_argument("--no-e0-refit", action="store_true",
                help="skip the per-element energy shift fitted to the initial model's residuals")
+p.add_argument("--freeze", nargs="*", default=[],
+               help="freeze parameters whose module path contains any of these substrings")
+p.add_argument("--train-only", nargs="*", default=[],
+               help="freeze every parameter whose module path contains none of these substrings")
+p.add_argument("--init-vacuum", help="solvent model: copy a vacuum runs/<name> into the shared (non-solvent) weights")
+p.add_argument("--delta-from", help="solvent model: targets minus this set's U and F, frame for frame (e.g. gas)")
+p.add_argument("--grad-report", action="store_true",
+               help="print per-parameter gradient norms for one training batch and exit")
 p.add_argument("--name", required=True)
 args = p.parse_args()
 sets = [(s.split("=")[0], int(s.split("=")[1]) if "=" in s else 0) for s in args.sets]
@@ -85,6 +93,13 @@ def load(split, nmax):
         d["mask"][i, :k] = True
         if args.model == "solvent":
             d["solv_species"][i] = solv  # the model reads solv_species[0]; fill every slot
+    if args.delta_from:  # relabelled sets share geometries frame for frame with the reference set
+        ref = read(data_dir / f"gfn2_{args.delta_from}_{split}.xyz", ":")
+        for i, (f, _) in enumerate(frames):
+            g = ref[i % len(ref)]
+            assert onp.allclose(g.positions, f.positions), "delta reference frames do not match"
+            d["F"][i, :len(f)] -= g.arrays["REF_forces"] * KJ_PER_EV * 10.0
+            d["U"][i] -= (g.info["REF_energy"] - sum(GFN2_E0S[z] for z in g.numbers)) * KJ_PER_EV
     d["U_weight"] = onp.ones(n)
     d["F_weight"] = nmax / d["mask"].sum(1)  # as ConSolv: per-frame force MSE over real atoms
     return d
@@ -115,6 +130,12 @@ if args.init == "published":
     shapes = lambda t: {k: {kk: vv.shape for kk, vv in v.items()} for k, v in t.items()}
     assert shapes(pub) == shapes(params), "published params do not match the architecture"
     params = pub
+if args.init_vacuum:  # vacuum weights -> the solvent network's shared modules (published_solvent_params' renaming)
+    vac = consolv_model.load_params(ROOT / args.init_vacuum / "params.pkl")
+    vac = {k.replace("mace", "mace_consol").replace("linear_node_embedding_layer", "linear_node_embedding_block"): v
+           for k, v in vac.items()}
+    print("from vacuum:", sorted(k for k in params if k in vac), flush=True)
+    params = consolv_model.merge(params, vac)
 
 steps = args.epochs * d0["U"].shape[0] // args.batch
 optimizer = optax.chain(  # ConSolv's init_optimizer (Adam/Nesterov, decay, polynomial lr) + clip
@@ -122,6 +143,11 @@ optimizer = optax.chain(  # ConSolv's init_optimizer (Adam/Nesterov, decay, poly
     optax.scale_by_adam(b1=0.9, b2=0.99, eps=1e-8, eps_root=1e-4, nesterov=True),
     optax.transforms.add_decayed_weights(config["optimizer"]["weight_decay"]),
     optax.scale_by_learning_rate(optax.polynomial_schedule(args.lr, args.lr, 2, steps), flip_sign=True))
+if args.freeze or args.train_only:  # zero the final updates of frozen leaves (also cancels their weight decay)
+    is_frozen = lambda k: any(f in k for f in args.freeze) or (args.train_only and not any(t in k for t in args.train_only))
+    frozen = {k: {kk: is_frozen(k) for kk in v} for k, v in params.items()}
+    print("frozen:", sorted(k for k, v in frozen.items() if any(v.values())), flush=True)
+    optimizer = optax.chain(optimizer, optax.masked(optax.set_to_zero(), frozen))
 
 trainer = trainers.ForceMatching(
     params, optimizer, energy_fn_template, nbrs_init,
@@ -149,6 +175,18 @@ if not args.no_e0_refit:
 trainer.set_dataset(data["training"], stage="training")
 trainer.set_dataset(data["validation"], stage="validation", include_all=True)
 
+if args.grad_report:  # one training-batch gradient, largest leaves first, then exit
+    *_, grad, per_target = trainer._update_fn(trainer.state.params, trainer.state.opt_state,
+                                              next(trainer._get_batch()), per_target=True)
+    leaves = tree_util.tree_flatten_with_path(grad)[0]
+    norms = sorted(((float(onp.linalg.norm(onp.asarray(g))), tree_util.keystr(k), onp.shape(g))
+                    for k, g in leaves), reverse=True)
+    total = sum(n ** 2 for n, _, _ in norms) ** 0.5
+    print(f"loss terms: { {k: float(v) for k, v in per_target.items()} }  total grad norm {total:.3e}")
+    for n, k, s in norms[:20]:
+        print(f"{n:12.3e}  {(n / total) ** 2:6.1%}  {s}  {k}")
+    raise SystemExit
+
 
 def metrics(p, split):
     """Energy RMSE (kcal/mol per frame and per atom), force RMSE (kcal/mol/A); for several
@@ -173,12 +211,15 @@ def metrics(p, split):
 before = metrics(params, "validation")
 print("before:", before, flush=True)
 trainer.train(args.epochs)
+# chemtrain stores squared norms
+pd.DataFrame({"grad_norm": [float(g) ** 0.5 for g in trainer.gradient_norm_history]}).to_csv(
+    out / "grad_norms.csv", index_label="step")
 after = metrics(trainer.best_params, "validation")
 print("after: ", after, flush=True)
 
 pickle.dump(tree_util.tree_map(onp.asarray, trainer.best_params), open(out / "params.pkl", "wb"))
 # energies from this model: E_ref = U_model + sum_i e0_shift[Z_i] + sum_i GFN2_E0S[Z_i]
-tomli_w.dump({"model": config["model"], "args": vars(args), "nmax": nmax,
+tomli_w.dump({"model": config["model"], "args": {k: v for k, v in vars(args).items() if v is not None}, "nmax": nmax,
               "e0_shift_kJmol": {str(z): float(s) for z, s in zip(elements, e0_shift)}},
              open(out / "config.toml", "wb"))
 pd.DataFrame([{"stage": "before", **before}, {"stage": "after", **after}]).to_csv(out / "metrics.csv", index=False)

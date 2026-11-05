@@ -143,9 +143,14 @@ Validation RMSE:
   min-norm; complex = rod + wheel makes it rank-deficient), removes it from the targets and
   stores it in `runs/<name>/config.toml`. Fitted shifts: H −165, C −137, N −17, O −55,
   F −116 kJ/mol.
-- Gradient norms are still 1e10–1e13 before clipping (kJ/mol, nm, sums over 144 atoms).
-  Clipping keeps it stable. Consider normalising the loss (per-atom energy, unit force
-  scale) before real runs.
+- The "Gradient norm" in chemtrain's training.log is the **squared** norm
+  (`chemtrain.util.tree_norm` returns Σ x·x despite its docstring). The logged 1e10–1e13 are
+  real norms of ~1e5–3e6. They fluctuate but do not grow. `train.py --grad-report` at the
+  published vacuum start: norm 6.1e5, 92% of it from the single global
+  `atomic_energy_layer/~/scale_shift_layer` scale. Adam normalises per parameter, so that
+  does not swamp the rest, and clipping before Adam barely changes step sizes. Loss terms
+  are balanced (F 3.3e4 × γ_F 0.01 vs U 2.4e2). No loss normalisation needed.
+  `train.py` writes the true (square-rooted) per-step norms to `runs/<name>/grad_norms.csv`.
 - chemtrain's trainer creates `checkpoints/` in the cwd; `train.py` chdirs to
   `runs/<name>/`.
 
@@ -210,14 +215,44 @@ both models ~4–5.
 - Reference BE moves < ~1 kcal/mol between the two models' geometries, so this compares
   energies, not structures.
 
+## 7-rotaxane GFN2 dataset (`data/rotx7/`)
+
+Inputs: `inputs/current_structures/` (gitignored; threaded starting geometries):
+rot1, rot2htpuma, rot3, dethread1–4 (104–144 atoms; wheels 24C8 or DB24C8). XYZ order is rod
+first, then wheel. `make_gfn2_data.py --fragments` takes the rod as the covalent component
+holding atom 1 (verified against the SMILES formulas for all 7). Driver: `scripts/run_rotx7.sh`
+(resumable, detached).
+
+Per complex: GFN2 gas relax + 1200 × 0.5 fs Langevin MD at 300 K, sampled every 30 steps →
+42 frames (relaxed minimum + 41 MD). Every frame is cut into complex, rod and wheel; the
+fragments get gas single points. Everything is then relabelled with GFN2/ALPB in hexane,
+chloroform, acetone, DMF, water and DMSO (ConSolv indices 25, 11, 7, 53, 1, 104).
+Validation = dethread4 held out entirely.
+
+| set | train frames | valid frames |
+|---|---|---|
+| gas + each of 6 solvents | 756 (6 systems × 42 × 3 parts) | 126 (dethread4) |
+
+Timing, serial on the laptop (2026-11-05): MD + gas labels ~41 min for all 7 complexes
+(~5–7 min each); each solvent relabel of 882 frames ~2.5–3 min (~0.2 s per single point).
+The mini-test timings above were inflated: gas sampling ran 5 processes at once.
+
 ## Next steps (not done)
 
 - Train only the solvent part on E_ALPB − E_gas with the vacuum part frozen, closer to
   ConSolv's vacuum + solvent split. ConSolv itself fits the solvent part top-down to
   experimental ΔG_solv.
-- Normalise the loss (gradient norms 1e10+ before clipping).
-- Real data: more molecules and solvents, independent validation trajectories; a GPU
-  (young-ng / Modal) for anything beyond a mini test.
+- Production: label with DFT at the published level, ωB97M-D3(BJ)/def2-TZVPPD (SPICE) and train on rotaxane
+  frames plus a small subset of the original training data to limit forgetting. See `ROTX7.md`
+  "Notes for production training".
+- Train on `data/rotx7/` on Modal (vacuum on gas; solvent on the 6 ALPB sets, or frozen
+  vacuum + solvent delta via `train.py --freeze`).
+
+## Local-only tools (not in requirements.lock.txt)
+
+Installed into the repo `.venv` for the laptop side only: `modal` (launches
+`scripts/modal_train.py`; the Modal image is built from the lock file), `markdown` and `xhtml2pdf`
+(`scripts/md_to_pdf.py`).
 
 ## Conventions
 

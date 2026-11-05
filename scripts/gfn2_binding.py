@@ -3,7 +3,7 @@
 For each <results>/<system>_<solvent>_relaxed.xyz: GFN2/ALPB single points of the
 complex, rod and wheel (each at its geometry in that complex), in that solvent.
 BE = E(complex) - E(rod) - E(wheel), kcal/mol, written to <results>/gfn2_binding.csv.
-Solvent names must be ALPB names (hexane, chloroform, acetone, dmf, water, ...).
+Solvent names must be ALPB names (hexane, chloroform, acetone, dmf, water, ...), or gas.
 
 Run with the mace repo's env (tblite), serially:
     ~/python_mac/mace/.venv/bin/python scripts/gfn2_binding.py results/alpb5_ft \
@@ -42,7 +42,8 @@ for system in args.systems:
         E = {}
         for part, atoms in [("complex", cplx), ("rod", cplx[label != wheel]), ("wheel", cplx[label == wheel])]:
             atoms = atoms.copy()
-            E[part] = gfn2_data.gfn2_singlepoint(atoms, solvation=("alpb", solv))["energy"] * KCAL_PER_EV
+            kw = {} if solv == "gas" else {"solvation": ("alpb", solv)}  # "gas": plain GFN2
+            E[part] = gfn2_data.gfn2_singlepoint(atoms, **kw)["energy"] * KCAL_PER_EV
         be = E["complex"] - E["rod"] - E["wheel"]
         print(f"{system} {solv}: GFN2/ALPB BE = {be:.2f} kcal/mol", flush=True)
         rows.append({"system": system, "solvent": solv, "BE_gfn2_alpb_kcal": be})

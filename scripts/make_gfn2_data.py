@@ -11,6 +11,14 @@ Run with the mace repo's env (tblite lives there; this script imports no torch):
     ~/python_mac/mace/.venv/bin/python scripts/make_gfn2_data.py inputs/rot1.xyz inputs/rot2.xyz
     ... --solvent water        # GFN2/ALPB instead of gas phase
 
+--fragments: MD on the complexes only; every sampled complex frame is cut into rod
+(the covalent component holding atom 1) and wheel, which get gas single points. Per
+system -> <out>/gfn2_gas_<sys>.xyz (info part = complex/rod/wheel; skipped if it exists,
+so reruns resume). Merged by system: --valid-systems go to valid, the rest to train:
+    ... scripts/make_gfn2_data.py --fragments --out data/rotx7 --md-steps 1200 \
+        --sample-every 30 --valid-systems dethread4 inputs/current_structures/*.xyz
+<sys> is the xyz stem up to the first '_'.
+
 --relabel: single-point existing extxyz frames in an ALPB solvent instead (no new
 sampling), so every solvent sees the same geometries:
     ... scripts/make_gfn2_data.py --relabel data/gfn2_gas_train.xyz data/gfn2_gas_valid.xyz --solvent water
@@ -38,6 +46,8 @@ p.add_argument("--sample-every", type=int, default=20)
 p.add_argument("--temperature", type=float, default=300.0)
 p.add_argument("--workers", type=int, default=1)
 p.add_argument("--relabel", action="store_true", help="xyz args are extxyz frames to re-label")
+p.add_argument("--fragments", action="store_true", help="MD on complexes; label complex, rod and wheel frames")
+p.add_argument("--valid-systems", type=lambda s: s.split(","), default=[], help="--fragments: comma-separated systems held out as validation")
 p.add_argument("--out", default=str(ROOT / "data"))
 args = p.parse_args()
 out = Path(args.out)
@@ -46,6 +56,10 @@ out.mkdir(exist_ok=True)
 if args.relabel:
     assert args.solvent != "gas", "--relabel is for ALPB solvents"
     for path in args.xyz:
+        dest = out / Path(path).name.replace("gas", args.solvent)
+        if dest.exists():
+            print(f"{dest} exists, skipped", flush=True)
+            continue
         frames = read(path, ":")
         for f in frames:
             f.calc = None
@@ -55,8 +69,8 @@ if args.relabel:
             f.info.pop("energy", None)
             f.arrays["REF_forces"] = res["forces"]
             f.arrays.pop("forces", None)
-        dest = out / Path(path).name.replace("gas", args.solvent)
-        write(dest, frames, format="extxyz")
+        write(dest.with_suffix(".tmp.xyz"), frames, format="extxyz")
+        dest.with_suffix(".tmp.xyz").rename(dest)
         print(f"{path} -> {dest} ({len(frames)} frames)", flush=True)
     sys.exit()
 
@@ -70,6 +84,48 @@ def split(atoms):
     wheel = [c for c in range(2) if 7 not in atoms.numbers[label == c]][0]
     return atoms[label != wheel], atoms[label == wheel]
 
+
+if args.fragments:
+    assert args.solvent == "gas", "--fragments labels gas phase; use --relabel for ALPB"
+    systems = []
+    for xyz in args.xyz:
+        sysname = Path(xyz).stem.split("_")[0]
+        dest = out / f"gfn2_gas_{sysname}.xyz"
+        systems.append((sysname, dest))
+        if dest.exists():
+            print(f"{dest} exists, skipped", flush=True)
+            continue
+        cplx = read(xyz)
+        r = covalent_radii[cplx.numbers]
+        ncomp, label = csgraph.connected_components(cplx.get_all_distances() < 1.2 * (r[:, None] + r[None, :]))
+        nrod = int((label == label[0]).sum())
+        assert ncomp == 2 and (label[:nrod] == label[0]).all(), f"{xyz}: not rod atoms 1..{nrod} + wheel"
+        cplx.info["label"] = sysname
+        md = out / f"gfn2_gas_{sysname}_md.xyz"
+        if not md.exists():
+            gfn2_data.generate_dataset([cplx], outfile=str(md), temperatures_K=(args.temperature,),
+                                       md_steps=args.md_steps, sample_every=args.sample_every,
+                                       do_normal_modes=False)
+        frames = []
+        for f in read(md, ":"):
+            f.info["part"] = "complex"
+            frames.append(f)
+            for part, sub in (("rod", f[:nrod]), ("wheel", f[nrod:])):
+                sub.calc = None
+                res = gfn2_data.gfn2_singlepoint(sub)
+                sub.info.pop("energy", None)
+                sub.arrays.pop("forces", None)
+                sub.info.update(REF_energy=res["energy"], part=part)
+                sub.arrays["REF_forces"] = res["forces"]
+                frames.append(sub)
+        write(dest.with_suffix(".tmp.xyz"), frames, format="extxyz")
+        dest.with_suffix(".tmp.xyz").rename(dest)
+        print(f"{sysname}: {len(cplx)} atoms (rod {nrod}), {len(frames) // 3} frames x 3 parts", flush=True)
+    for part, keep in (("train", lambda n: n not in args.valid_systems), ("valid", lambda n: n in args.valid_systems)):
+        frames = [f for n, dest in systems if keep(n) for f in read(dest, ":")]
+        write(out / f"gfn2_gas_{part}.xyz", frames, format="extxyz")
+        print(f"{part}: {len(frames)} frames -> gfn2_gas_{part}.xyz", flush=True)
+    sys.exit()
 
 molecules = []
 for i, xyz in enumerate(args.xyz):
