@@ -3,7 +3,7 @@
 Working notes: what was needed to get ConSolv running, what has been verified, and what
 is open. User-facing docs are in `README.md`.
 
-## Status (2026-11-04)
+## Status (2026-11-05)
 
 | piece | state |
 |---|---|
@@ -14,6 +14,8 @@ is open. User-facing docs are in `README.md`.
 | Upstream clone | removed; nothing depends on it |
 | Fresh-venv install from README | tested: reproduces regression exactly |
 | (b) Solvent model trained on GFN2/ALPB in 5 solvents (`train.py --model solvent`) | mini test passed (below) |
+| 7-rotaxane GFN2 test (`ROTX7.md`): data, 4 models on Modal, held-out BE | done; see `ROTX7.md` |
+| Vacuum + delta solvent scheme (`train.py --delta-from`, `binding_energy.py --vacuum-params`) | done; best solvent response |
 | MPS / jax-metal | not tried |
 
 ## Where the fixes to upstream live
@@ -239,20 +241,35 @@ The mini-test timings above were inflated: gas sampling ran 5 processes at once.
 
 ## Next steps (not done)
 
-- Train only the solvent part on E_ALPB − E_gas with the vacuum part frozen, closer to
-  ConSolv's vacuum + solvent split. ConSolv itself fits the solvent part top-down to
-  experimental ΔG_solv.
+- Improve the vacuum model's host–guest interaction: it over-binds held-out dethread4 by
+  6.4 kcal/mol in the gas phase and dominates the remaining BE error (`ROTX7.md`).
 - Production: label with DFT at the published level, ωB97M-D3(BJ)/def2-TZVPPD (SPICE) and train on rotaxane
   frames plus a small subset of the original training data to limit forgetting. See `ROTX7.md`
   "Notes for production training".
-- Train on `data/rotx7/` on Modal (vacuum on gas; solvent on the 6 ALPB sets, or frozen
-  vacuum + solvent delta via `train.py --freeze`).
+- Use the delta scheme (a) for production (vacuum model + solvent model on E_solv − E_gas).
+- Optional: forgetting test on unseen solvents (relabel held-out frames in DCM, toluene, ...).
+
+## Training on Modal
+
+`scripts/modal_train.py` runs `train.py` on an L4 (falls back to A10G; L4s have been scarce),
+app `mlisp-train`, results on volume `mlisp-runs` (`modal volume get mlisp-runs <name> runs/`).
+Launch detached and give each launch its own local log:
+`modal run --detach scripts/modal_train.py --which vacuum|solvent|delta|embed`.
+
+- Cost on an L4 (rotx7, batch 4): vacuum 756 frames ~0.2 min/epoch; solvent 4536 frames
+  ~1.25–1.45 min/epoch (first epoch +1 min JIT). The vacuum run was 10 min, the solvent runs
+  25–50 min.
+- Gotchas: the lock file's `dataclasses==0.8` (py3.6 backport) is skipped in the image; the
+  script re-imports inside the container, so the lock file is read only when `modal.is_local()`;
+  a stopped-then-relaunched app keeps retrying unless stopped with `modal app stop -y <id>`.
+- `train.py` writes `config.toml` with `None`-valued args removed (a crash there cost the
+  config of `rotx7_delta` and `rotx7_embed`; both were rebuilt from their logs, noted inside).
 
 ## Local-only tools (not in requirements.lock.txt)
 
 Installed into the repo `.venv` for the laptop side only: `modal` (launches
 `scripts/modal_train.py`; the Modal image is built from the lock file), `markdown` and `xhtml2pdf`
-(`scripts/md_to_pdf.py`).
+(`scripts/md_to_pdf.py`), `pypdfium2` (rendering PDF pages to check them).
 
 ## Conventions
 
