@@ -47,6 +47,107 @@ All use the same data. They differ in what the network learns and where it start
 Common settings: batch 4, γ_U = 1, γ_F = 0.01, per-element E0 refit on the starting model's
 residuals (`train.py`).
 
+## How one model covers several solvents
+
+### The mechanism (same in every solvent-conditional network)
+
+`rotx7_solv`, (a) `rotx7_delta`, (b) `rotx7_embed` and the published ConSolv model all use the
+same architecture (MACE_CONSOL, `block_name = "descriptor"`) and receive the solvent the same
+way. `rotx7_vac` has no solvent input and is gas phase only.
+
+- Each frame carries an integer solvent index, `solv_species` (ConSolv descriptor row + 1,
+  from `scripts/solvent_index.py`: hexane 25, chloroform 11, acetone 7, DMF 53, water 1,
+  DMSO 104; 0 is the all-zero vacuum row).
+- The network looks up that solvent's 15 normalised RDKit descriptors. This is a fixed table,
+  not a learned embedding, so no model has per-solvent parameters.
+- The descriptors enter in two places. **(i) Node embedding:** each atom's element embedding
+  attends to the projected descriptor vector (cross-attention block, ~133k params). The result
+  is added to the atom embedding. **(ii) Interaction layers:** in both message-passing layers,
+  two small linear layers (1.5k params per layer) map the descriptors to a factor that rescales
+  the radial basis weighting the messages (`solv_tp = true`).
+- **How one set of weights gives each solvent its own behaviour.** Every weight is used for every
+  solvent, and no weight belongs to a particular one. The descriptor vector is combined with the
+  atom features at (i) and multiplies into the message weights at (ii). Feeding in water's
+  descriptors therefore draws water's behaviour out of the same weights that give hexane's
+  behaviour from hexane's descriptors. The model is one function E(R, descriptors), with the
+  solvent as an argument, the way temperature is an argument in a fit E(R, T). Training adjusts
+  the weights until, for each training solvent, these combinations reproduce that solvent's
+  energies and forces.
+- Consequences: a solvent between the training solvents in descriptor space gets an
+  interpolated response, and changing the shared weights for some solvents also changes the
+  predictions for all the others (see "Catastrophic forgetting").
+
+**The published model** trained these paths top-down, on experimental solvation free energies
+of small solutes in 66 solvents (DEV.md). It was not trained on energies or forces in each
+solvent.
+
+### 1. How the fine-tuned models train on several solvents at once
+
+The data layout is the same for all three. `train.py --model solvent --sets hexane=25
+chloroform=11 ...` reads one labelled file per solvent (`data/gfn2_<solvent>_{train,valid}.xyz`),
+concatenates them and stamps every frame with its solvent's index. Each (geometry, solvent) pair
+is a separate training example, so one geometry R becomes six rows:
+
+| input | target |
+|---|---|
+| R, index 25 (hexane) | GFN2/ALPB E, F in hexane |
+| R, index 11 (chloroform) | E, F in chloroform |
+| R, index 7 (acetone) | E, F in acetone |
+| R, index 53 (DMF) | E, F in DMF |
+| R, index 1 (water) | E, F in water |
+| R, index 104 (DMSO) | E, F in DMSO |
+
+That gives 756 geometries × 6 = 4,536 rows. They are shuffled together, so a batch of 4 can hold,
+for example, geometry 12 in water, geometry 300 in hexane, geometry 12 in DMSO and geometry 55 in acetone. Each row is scored
+against its own label, and all rows update the same weights. For (a) the targets are the solvent
+values minus the gas values of the same R. There is one loss
+(γ_U·MSE(E) + γ_F·MSE(F)) and one set of weights. On identical geometries, the solvent effect is
+the only thing that differs between copies, and the index is the only input that differs. The
+per-element E0 shift is fitted once for all solvents, so it cannot absorb solvent-to-solvent
+differences.
+
+The three fine-tunes differ in their targets, their starting weights and which parts may move:
+
+| run | starts from | target per solvent copy | trained | solvent paths (i) attention, (ii) radial |
+|---|---|---|---|---|
+| `rotx7_solv` | published ConSolv weights (66 solvents, free energies) | total E_ALPB, F | all 768k params | both retrained; shared layers move too |
+| (a) `rotx7_delta` | random init | E_ALPB − E_gas, F_ALPB − F_gas (`--delta-from gas`) | all params of the delta network | both learned from scratch, from these 6 solvents only |
+| (b) `rotx7_embed` | `rotx7_vac` in shared layers; published weights elsewhere | total E_ALPB, F | (i) only (`--train-only non_linear_solvent_embedding`) | (i) retrained; **(ii) frozen at published values** |
+
+- **`rotx7_solv`** begins with a solvent response learned from free energies and reshapes it
+  to the ALPB energies and forces. Every weight is shared, so the outputs for the 60 solvents
+  it was not fine-tuned on also change. That change is untested.
+- **(a)** has no prior. Its whole notion of "solvent" comes from 6 points in descriptor space.
+  It learns only the solvent correction, because the gas-phase part is subtracted from each
+  target. Index 0 (vacuum) was never in its training data.
+- **(b)** The (ii) radial-modulation layers do not exist in the vacuum model, so `--init-vacuum`
+  left them at the published values. They also do not match the `--train-only` substring, so
+  they stayed frozen. Only path (i) adapted. This is a possible contributor to (b)'s poor
+  result (Conclusion 3), not tested separately.
+
+### 2. Choosing a solvent at inference
+
+In every case you pass the solvent's index with the coordinates and the weights stay the same.
+`binding_energy.py` gives every atom `solv_species = <index>` (`jnp.full(n, solv)`) and relaxes
+and evaluates once per listed solvent:
+
+| model | call | energy evaluated |
+|---|---|---|
+| `rotx7_solv` | `--params runs/rotx7_solv --solvents water=1 dmso=104 ...` | network(geometry, index) |
+| (a) | `--params runs/rotx7_delta --vacuum-params runs/rotx7_vac --solvents ...` | E_vac(geometry) + E_delta(geometry, index); only the delta term sees the solvent |
+| (b) | `--params runs/rotx7_embed --solvents ...` | network(geometry, index) |
+| gas phase | `--params runs/rotx7_vac --solvents gas=0` | vacuum network; the index is ignored |
+
+- One trained model therefore gives a separate potential energy surface for each index.
+  Changing solvent means changing one integer.
+- Any of the 147 descriptor rows can be passed. For the 6 training solvents the result is
+  fitted. For any other solvent it is an interpolation through the descriptors: from the
+  published 66-solvent prior plus the fine-tune for `rotx7_solv`, and from 6 solvents alone
+  for (a). Neither has been tested (see "Catastrophic forgetting" below).
+- For (a), use `rotx7_vac` alone for the gas phase, not the delta network with index 0.
+- Indices for new solvents come from their SMILES:
+  `scripts/solvent_index.py toluene=Cc1ccccc1`.
+
 ## Results
 
 ### Held-out validation (dethread4), energies and forces
@@ -151,6 +252,8 @@ points on each model's relaxed geometries.
    vacuum weights, the model stays close to the published one (MAE 10.1, wrong water placement).
    The solvent response needs more than the embedding block, at least when the reference level
    changes as here (ωB97M → GFN2).
+   Caveat: the run also froze the second solvent path (the radial modulation in the interaction
+   layers) at the published values, so this was not a clean test of "embedding only".
 4. **The remaining error is the vacuum interaction energy**, not the solvent model. The next
    improvement is a better vacuum model for host–guest interaction (more and more varied complex
    frames; in production, DFT labels at the published level, ωB97M-D3(BJ)/def2-TZVPPD).
