@@ -11,11 +11,11 @@ from xhtml2pdf import pisa
 FONT = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf"
 CSS = f"""
 @font-face {{ font-family: uni; src: url("{FONT}"); }}
-@page {{ size: a4 landscape; margin: 1.5cm; }}
+@page {{ size: a4; margin: 1.5cm; }}
 body {{ font-family: uni; font-size: 9pt; line-height: 1.3; }}
 h1 {{ font-size: 16pt; }} h2 {{ font-size: 13pt; margin-top: 12pt; }} h3 {{ font-size: 11pt; }}
 table {{ border-collapse: collapse; margin: 6pt 0; }}
-th, td {{ border: 0.5pt solid #888; padding: 2pt 4pt; font-size: 8pt; }}
+th, td {{ border: 0.5pt solid #888; padding: 2pt 3pt; font-size: 7pt; }}
 th {{ background-color: #e8e8e8; }}
 code {{ font-family: uni; background-color: #f0f0f0; }}
 """
